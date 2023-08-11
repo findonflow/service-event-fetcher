@@ -102,6 +102,7 @@ func main() {
 
 			transformedEvents := []OverflowEvent{}
 			for _, event := range events {
+				//at .find we want events in this format but feel free to transform any way you want
 				oe, err := CreateOverflowEvent(event)
 				if err != nil {
 					fmt.Printf("ERROR block=%d %s\n", height, err.Error())
