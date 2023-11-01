@@ -34,12 +34,12 @@ func main() {
 	}
 	height, err := strconv.ParseUint(os.Args[2], 10, 64)
 	if err != nil {
-		panic("aprsing start height")
+		panic("parsing start height")
 	}
 
 	endBlockHeight, err := strconv.ParseUint(os.Args[3], 10, 64)
 	if err != nil {
-		panic("aprsing start height")
+		panic("parsing start height")
 	}
 
 	chunkSize := 250
