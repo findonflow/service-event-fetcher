@@ -311,7 +311,7 @@ func ensureStartsWith0x(in string) string {
 	return fmt.Sprintf("0x%s", in)
 }
 
-func GetServiceEvents(db *badger.DB, headerservice storagebadger.Headers) map[string][]OverflowEvent {
+func GetServiceEvents(db *badger.DB, headerservice *storagebadger.Headers) map[string][]OverflowEvent {
 	eventStream := db.NewStream()
 	eventStream.NumGo = 32                       // Set number of goroutines to use for iteration.
 	eventStream.Prefix = []byte{0x6A}            // tx        //events
