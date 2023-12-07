@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -17,36 +16,33 @@ import (
 	jsondc "github.com/onflow/cadence/encoding/json"
 	"github.com/vmihailenco/msgpack"
 
-	"github.com/onflow/flow-go/cmd/util/cmd/common"
-	flowmodel "github.com/onflow/flow-go/model/flow"
-	"github.com/onflow/flow-go/module/metrics"
-	storagebadger "github.com/onflow/flow-go/storage/badger"
+	"github.com/onflow/flow-go/model/flow"
 	"github.com/onflow/flow-go/utils/io"
 	"github.com/samber/lo"
-
-	"go.mitsakis.org/workerpool"
 )
 
 func main() {
 	// either use these or just hard code and fix
-	baseDir := os.Args[4]
-	err := os.MkdirAll(baseDir, 0644)
-	if err != nil {
-		panic(err)
-	}
-	height, err := strconv.ParseUint(os.Args[2], 10, 64)
-	if err != nil {
-		panic("parsing start height")
-	}
+	/*
+		baseDir := os.Args[4]
+		err := os.MkdirAll(baseDir, 0644)
+		if err != nil {
+			panic(err)
+		}
+		height, err := strconv.ParseUint(os.Args[2], 10, 64)
+		if err != nil {
+			panic("parsing start height")
+		}
 
-	endBlockHeight, err := strconv.ParseUint(os.Args[3], 10, 64)
-	if err != nil {
-		panic("parsing start height")
-	}
+		endBlockHeight, err := strconv.ParseUint(os.Args[3], 10, 64)
+		if err != nil {
+			panic("parsing start height")
+		}
 
-	chunkSize := 250
-	maxWorker := 30
+		chunkSize := 250
+		maxWorker := 30
 
+	*/
 	badgerDir := os.Args[1]
 	db, err := badger.Open(badger.DefaultOptions(badgerDir).WithTruncate(true))
 	if err != nil {
@@ -55,79 +51,84 @@ func main() {
 
 	defer db.Close()
 
+	headers := GetHeaders(db)
+
 	// fmt.Println("try to loop")
-	events := GetServiceEvents(db)
+	events := GetServiceEvents(db, headers)
 	fmt.Println(len(events))
 	fmt.Println(lo.Keys(events))
 
-	fmt.Scanln()
-	blockRange := lo.RangeFrom(height, int(endBlockHeight)-int(height))
-	blockChunks := lo.Chunk(blockRange, chunkSize)
+	save("", events, 15)
+	/*
+		fmt.Scanln()
+		blockRange := lo.RangeFrom(height, int(endBlockHeight)-int(height))
+		blockChunks := lo.Chunk(blockRange, chunkSize)
 
-	err = os.MkdirAll(baseDir, 0644)
-	if err != nil {
-		panic(err)
-	}
+		err = os.MkdirAll(baseDir, 0644)
+		if err != nil {
+			panic(err)
+		}
 
-	metrics := &metrics.NoopCollector{}
-	serviceEventsService := storagebadger.NewServiceEvents(metrics, db)
-	allServices := common.InitStorages(db)
-	blockService := allServices.Blocks
+		metrics := &metrics.NoopCollector{}
+		serviceEventsService := storagebadger.NewServiceEvents(metrics, db)
+		allServices := common.InitStorages(db)
+		blockService := allServices.Blocks
 
-	p, err := workerpool.NewPoolSimple(maxWorker, func(job workerpool.Job[[]uint64], workerID int) error {
-		var totalRead time.Duration
-		start := time.Now()
-		for _, height := range job.Payload {
+		p, err := workerpool.NewPoolSimple(maxWorker, func(job workerpool.Job[[]uint64], workerID int) error {
+			var totalRead time.Duration
+			start := time.Now()
+			for _, height := range job.Payload {
 
-			readStart := time.Now()
+				readStart := time.Now()
 
-			block, err := blockService.ByHeight(height)
-			if err != nil {
-				fmt.Printf("ERROR block=%d %s\n", height, err.Error())
-				continue
-			}
-
-			events, err := serviceEventsService.ByBlockID(block.ID())
-			if err != nil {
-				fmt.Printf("ERROR block=%d %s\n", height, err.Error())
-				continue
-			}
-
-			if len(events) == 0 {
-				fmt.Println("No service events")
-				continue
-			}
-
-			transformedEvents := []OverflowEvent{}
-			for _, event := range events {
-				// at .find we want events in this format but feel free to transform any way you want
-				oe, err := CreateOverflowEvent(event)
+				block, err := blockService.ByHeight(height)
 				if err != nil {
 					fmt.Printf("ERROR block=%d %s\n", height, err.Error())
 					continue
 				}
-				transformedEvents = append(transformedEvents, *oe)
+
+				events, err := serviceEventsService.ByBlockID(block.ID())
+				if err != nil {
+					fmt.Printf("ERROR block=%d %s\n", height, err.Error())
+					continue
+				}
+
+				if len(events) == 0 {
+					fmt.Println("No service events")
+					continue
+				}
+
+				transformedEvents := []OverflowEvent{}
+				for _, event := range events {
+					// at .find we want events in this format but feel free to transform any way you want
+					oe, err := CreateOverflowEvent(event)
+					if err != nil {
+						fmt.Printf("ERROR block=%d %s\n", height, err.Error())
+						continue
+					}
+					transformedEvents = append(transformedEvents, *oe)
+				}
+
+				readTime := time.Since(readStart)
+				totalRead = totalRead + readTime
+
+				save(baseDir, transformedEvents, height)
 			}
+			saveTime := time.Since(start)
+			startIndex := job.Payload[0]
 
-			readTime := time.Since(readStart)
-			totalRead = totalRead + readTime
-
-			save(baseDir, transformedEvents, height)
+			log.Printf("%02d - %08d/%08d indexed total readTime=%20s writeTime=%20s\n", workerID, startIndex, endBlockHeight-startIndex, totalRead, saveTime-totalRead)
+			return nil
+		})
+		if err != nil {
+			panic(err)
 		}
-		saveTime := time.Since(start)
-		startIndex := job.Payload[0]
 
-		log.Printf("%02d - %08d/%08d indexed total readTime=%20s writeTime=%20s\n", workerID, startIndex, endBlockHeight-startIndex, totalRead, saveTime-totalRead)
-		return nil
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	for _, chunk := range blockChunks {
-		p.Submit(chunk)
-	}
-	p.StopAndWait()
+		for _, chunk := range blockChunks {
+			p.Submit(chunk)
+		}
+		p.StopAndWait()
+	*/
 }
 
 func save(baseDir string, data interface{}, id uint64) {
@@ -150,11 +151,14 @@ type OverflowEvent struct {
 	Id               string                 `json:"id"`
 	TransactionId    string                 `json:"transactionID"`
 	Name             string                 `json:"name"`
-	TransactionIndex uint32                 `json:"transactionIndex"`
-	EventIndex       uint32                 `json:"eventIndex"`
+	TransactionIndex uint32                 `json:"transaction_hash"`
+	EventIndex       uint32                 `json:"event_index"`
+	BlockHeight      uint64                 `json:"block_height"`
+	Timestamp        time.Time              `json:"timestamp"`
+	Addresses        map[string][]string    `json:"types"`
 }
 
-func CreateOverflowEvent(event flowmodel.Event) (*OverflowEvent, error) {
+func CreateOverflowEvent(event flow.Event, header flow.Header) (*OverflowEvent, error) {
 	ev, err := jsondc.Decode(event.Payload)
 	if err != nil {
 		return nil, err
@@ -172,8 +176,14 @@ func CreateOverflowEvent(event flowmodel.Event) (*OverflowEvent, error) {
 	}
 
 	finalFields := map[string]interface{}{}
+	addresses := map[string][]string{}
 	for id, field := range ce.Fields {
 		name := fieldNames[id]
+
+		adr := ExtractAddresses(field)
+		if len(adr) > 0 {
+			addresses[name] = adr
+		}
 
 		value := CadenceValueToInterface(field)
 		if value != nil {
@@ -183,12 +193,15 @@ func CreateOverflowEvent(event flowmodel.Event) (*OverflowEvent, error) {
 
 	eventType := fmt.Sprint(event.Type)
 	oe := &OverflowEvent{
-		Id:               fmt.Sprintf("%s-%d", event.TransactionID.String(), event.EventIndex),
+		Id:               fmt.Sprintf("%d-%s-%d", header.Height, event.TransactionID.String(), event.EventIndex),
 		Fields:           finalFields,
 		Name:             eventType,
 		EventIndex:       event.EventIndex,
 		TransactionId:    event.TransactionID.String(),
 		TransactionIndex: event.TransactionIndex,
+		BlockHeight:      header.Height,
+		Timestamp:        header.Timestamp,
+		Addresses:        addresses,
 	}
 	return oe, nil
 }
@@ -293,7 +306,7 @@ func ensureStartsWith0x(in string) string {
 	return fmt.Sprintf("0x%s", in)
 }
 
-func GetServiceEvents(db *badger.DB) map[string][]OverflowEvent {
+func GetServiceEvents(db *badger.DB, headers Headers) map[string][]OverflowEvent {
 	eventStream := db.NewStream()
 	eventStream.NumGo = 32                       // Set number of goroutines to use for iteration.
 	eventStream.Prefix = []byte{0x6A}            // tx        //events
@@ -305,15 +318,17 @@ func GetServiceEvents(db *badger.DB) map[string][]OverflowEvent {
 
 			k := kv.GetKey()
 			blockID := hex.EncodeToString(k[1:33])
+
+			header := headers[blockID]
 			v := kv.GetValue()
-			var event flowmodel.Event
+			var event flow.Event
 			err := msgpack.Unmarshal(v, &event)
 			if err != nil {
 				return fmt.Errorf("could not decode the event: %w", err)
 			}
 
 			// at .find we want events in this format but feel free to transform any way you want
-			oe, err := CreateOverflowEvent(event)
+			oe, err := CreateOverflowEvent(event, header)
 			if err != nil {
 				fmt.Printf("ERROR block=%s %s\n", blockID, err.Error())
 				continue
@@ -333,4 +348,91 @@ func GetServiceEvents(db *badger.DB) map[string][]OverflowEvent {
 		return nil
 	}
 	return events
+}
+
+func GetHeaders(db *badger.DB) Headers {
+	blockStream := db.NewStream()
+	blockStream.NumGo = 32                      // Set number of goroutines to use for iteration.
+	blockStream.Prefix = []byte{0x1E}           // height to block         //tx        //events
+	blockStream.LogPrefix = "Find.HeaderStream" // For identifying stream logs. Outputs to Logger.
+
+	headers := Headers{}
+	blockStream.Send = func(list *pb.KVList) error {
+		for _, kv := range list.GetKv() {
+
+			k := kv.GetKey()
+
+			blockID := hex.EncodeToString(k[1:33])
+			v := kv.GetValue()
+			// v value
+			var header flow.Header
+			err := msgpack.Unmarshal(v, &header)
+			if err != nil {
+				return fmt.Errorf("could not decode the event: %w", err)
+			}
+			headers[blockID] = header
+		}
+		return nil
+	}
+
+	if err := blockStream.Orchestrate(context.Background()); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	return headers
+}
+
+type Headers = map[string]flow.Header
+
+func ExtractAddresses(field cadence.Value) []string {
+	if field == nil {
+		return nil
+	}
+
+	switch field := field.(type) {
+	case cadence.Optional:
+		return ExtractAddresses(field.Value)
+	case cadence.Dictionary:
+		result := []string{}
+		for _, item := range field.Pairs {
+			value := ExtractAddresses(item.Value)
+			key := getAndUnquoteString(item.Key)
+
+			if value != nil && key != "" {
+				result = append(result, value...)
+			}
+		}
+		if len(result) == 0 {
+			return nil
+		}
+		return result
+	case cadence.Struct:
+		result := []string{}
+		for _, subField := range field.Fields {
+			value := ExtractAddresses(subField)
+			if value != nil {
+				result = append(result, value...)
+			}
+		}
+		if len(result) == 0 {
+			return nil
+		}
+		return result
+	case cadence.Array:
+		result := []string{}
+		for _, item := range field.Values {
+			value := ExtractAddresses(item)
+			if value != nil {
+				result = append(result, value...)
+			}
+		}
+		if len(result) == 0 {
+			return nil
+		}
+		return result
+	case cadence.Address:
+		return []string{ensureStartsWith0x(field.String())}
+	default:
+		return []string{}
+	}
 }
