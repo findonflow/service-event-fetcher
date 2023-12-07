@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,14 +12,15 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v2"
+	"github.com/dgraph-io/badger/v2/pb"
 	"github.com/onflow/cadence"
 	jsondc "github.com/onflow/cadence/encoding/json"
+	"github.com/vmihailenco/msgpack"
 
 	"github.com/onflow/flow-go/cmd/util/cmd/common"
 	flowmodel "github.com/onflow/flow-go/model/flow"
 	"github.com/onflow/flow-go/module/metrics"
 	storagebadger "github.com/onflow/flow-go/storage/badger"
-	"github.com/onflow/flow-go/storage/badger/operation"
 	"github.com/onflow/flow-go/utils/io"
 	"github.com/samber/lo"
 
@@ -25,8 +28,7 @@ import (
 )
 
 func main() {
-
-	//either use these or just hard code and fix
+	// either use these or just hard code and fix
 	baseDir := os.Args[4]
 	err := os.MkdirAll(baseDir, 0644)
 	if err != nil {
@@ -50,18 +52,15 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	// in order to void long iterations with big keys when initializing with an
-	// already populated database, we bootstrap the initial maximum key size
-	// upon starting
-	err = operation.RetryOnConflict(db.Update, func(tx *badger.Txn) error {
-		return operation.InitMax(tx)
-	})
-	if err != nil {
-		panic(err)
-	}
 
 	defer db.Close()
 
+	// fmt.Println("try to loop")
+	events := GetServiceEvents(db)
+	fmt.Println(len(events))
+	fmt.Println(lo.Keys(events))
+
+	fmt.Scanln()
 	blockRange := lo.RangeFrom(height, int(endBlockHeight)-int(height))
 	blockChunks := lo.Chunk(blockRange, chunkSize)
 
@@ -76,7 +75,6 @@ func main() {
 	blockService := allServices.Blocks
 
 	p, err := workerpool.NewPoolSimple(maxWorker, func(job workerpool.Job[[]uint64], workerID int) error {
-
 		var totalRead time.Duration
 		start := time.Now()
 		for _, height := range job.Payload {
@@ -102,7 +100,7 @@ func main() {
 
 			transformedEvents := []OverflowEvent{}
 			for _, event := range events {
-				//at .find we want events in this format but feel free to transform any way you want
+				// at .find we want events in this format but feel free to transform any way you want
 				oe, err := CreateOverflowEvent(event)
 				if err != nil {
 					fmt.Printf("ERROR block=%d %s\n", height, err.Error())
@@ -133,7 +131,6 @@ func main() {
 }
 
 func save(baseDir string, data interface{}, id uint64) {
-
 	fileName := fmt.Sprintf("%s/%d.json", baseDir, id)
 	if _, err := os.Stat(fileName); err != nil {
 		bytes, err := json.MarshalIndent(data, "", "  ")
@@ -149,16 +146,15 @@ func save(baseDir string, data interface{}, id uint64) {
 }
 
 type OverflowEvent struct {
-	Id               string                 `json:"id"`
 	Fields           map[string]interface{} `json:"fields"`
+	Id               string                 `json:"id"`
 	TransactionId    string                 `json:"transactionID"`
+	Name             string                 `json:"name"`
 	TransactionIndex uint32                 `json:"transactionIndex"`
 	EventIndex       uint32                 `json:"eventIndex"`
-	Name             string                 `json:"name"`
 }
 
 func CreateOverflowEvent(event flowmodel.Event) (*OverflowEvent, error) {
-
 	ev, err := jsondc.Decode(event.Payload)
 	if err != nil {
 		return nil, err
@@ -295,4 +291,46 @@ func ensureStartsWith0x(in string) string {
 		return in
 	}
 	return fmt.Sprintf("0x%s", in)
+}
+
+func GetServiceEvents(db *badger.DB) map[string][]OverflowEvent {
+	eventStream := db.NewStream()
+	eventStream.NumGo = 32                       // Set number of goroutines to use for iteration.
+	eventStream.Prefix = []byte{0x6A}            // tx        //events
+	eventStream.LogPrefix = "Find.ServiceEvents" // For identifying stream logs. Outputs to Logger.
+
+	events := map[string][]OverflowEvent{}
+	eventStream.Send = func(list *pb.KVList) error {
+		for _, kv := range list.GetKv() {
+
+			k := kv.GetKey()
+			blockID := hex.EncodeToString(k[1:33])
+			v := kv.GetValue()
+			var event flowmodel.Event
+			err := msgpack.Unmarshal(v, &event)
+			if err != nil {
+				return fmt.Errorf("could not decode the event: %w", err)
+			}
+
+			// at .find we want events in this format but feel free to transform any way you want
+			oe, err := CreateOverflowEvent(event)
+			if err != nil {
+				fmt.Printf("ERROR block=%s %s\n", blockID, err.Error())
+				continue
+			}
+
+			existingEvents, ok := events[blockID]
+			if !ok {
+				existingEvents = []OverflowEvent{}
+			}
+			existingEvents = append(existingEvents, *oe)
+			events[blockID] = existingEvents
+		}
+
+		if err := eventStream.Orchestrate(context.Background()); err != nil {
+			fmt.Println(err)
+		}
+		return nil
+	}
+	return events
 }
