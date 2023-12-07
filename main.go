@@ -17,6 +17,8 @@ import (
 	"github.com/vmihailenco/msgpack"
 
 	"github.com/onflow/flow-go/model/flow"
+	"github.com/onflow/flow-go/module/metrics"
+	storagebadger "github.com/onflow/flow-go/storage/badger"
 	"github.com/onflow/flow-go/utils/io"
 	"github.com/samber/lo"
 )
@@ -51,10 +53,13 @@ func main() {
 
 	defer db.Close()
 
-	headers := GetHeaders(db)
+	metrics := &metrics.NoopCollector{}
+	headerService := storagebadger.NewHeaders(metrics, db)
+
+	//	headers := GetHeaders(db)
 
 	// fmt.Println("try to loop")
-	events := GetServiceEvents(db, headers)
+	events := GetServiceEvents(db, headerService)
 	fmt.Println(len(events))
 	fmt.Println(lo.Keys(events))
 
@@ -306,7 +311,7 @@ func ensureStartsWith0x(in string) string {
 	return fmt.Sprintf("0x%s", in)
 }
 
-func GetServiceEvents(db *badger.DB, headers Headers) map[string][]OverflowEvent {
+func GetServiceEvents(db *badger.DB, headerservice storagebadger.Headers) map[string][]OverflowEvent {
 	eventStream := db.NewStream()
 	eventStream.NumGo = 32                       // Set number of goroutines to use for iteration.
 	eventStream.Prefix = []byte{0x6A}            // tx        //events
@@ -319,16 +324,23 @@ func GetServiceEvents(db *badger.DB, headers Headers) map[string][]OverflowEvent
 			k := kv.GetKey()
 			blockID := hex.EncodeToString(k[1:33])
 
-			header := headers[blockID]
+			bid, err := flow.HexStringToIdentifier(blockID)
+			if err != nil {
+				panic(err)
+			}
+			header, err := headerservice.ByBlockID(bid)
+			if err != nil {
+				panic(err)
+			}
 			v := kv.GetValue()
 			var event flow.Event
-			err := msgpack.Unmarshal(v, &event)
+			err = msgpack.Unmarshal(v, &event)
 			if err != nil {
 				return fmt.Errorf("could not decode the event: %w", err)
 			}
 
 			// at .find we want events in this format but feel free to transform any way you want
-			oe, err := CreateOverflowEvent(event, header)
+			oe, err := CreateOverflowEvent(event, *header)
 			if err != nil {
 				fmt.Printf("ERROR block=%s %s\n", blockID, err.Error())
 				continue
